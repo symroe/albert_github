@@ -135,7 +135,7 @@ class Plugin(PluginInstance, TriggerQueryHandler):
             }
         ]
 
-    def handleTriggerQuery(self, query: TriggerQuery):
+    def handleTriggerQuery(self, query: Query):
         if query.string.startswith("a "):
             # This is an admin command
             query.add(
@@ -155,7 +155,7 @@ class Plugin(PluginInstance, TriggerQueryHandler):
                 ]
             )
 
-    def _make_item(self, repo: Repo, query: TriggerQuery) -> Item:
+    def _make_item(self, repo: Repo, query: Query) -> Item:
         return StandardItem(
             id=f"{repo.account}-{repo.name}",
             text=repo.name,
