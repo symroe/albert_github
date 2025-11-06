@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 __doc__ = """
-Access your GutHub repos quickly through Albert.
+Access your GitHub repos quickly through Albert.
 
 This plugin caches all repos for a list of accounts (configured via the 
 plugin settings). 
@@ -10,20 +10,34 @@ It then allows opening the repo home page, PRs or issues.
 """
 
 
-md_iid = "2.0"
-md_version = "1.6"
+md_iid = "4.0"
+md_version = "2.0"
 md_name = "GitHub projects"
 md_description = "Open your GitHub projects using Albert"
 md_license = "MIT"
 md_url = "https://github.com/symroe/albert_github"
 md_maintainers = "https://mastodon.me.uk/@symroe"
+md_lib_dependencies = ["requests"]
 
 import json
+import logging
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 import requests
 from albert import *
+
+# Set up logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(os.path.expanduser('~/.cache/albert/github_plugin.log')),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -47,11 +61,20 @@ class Repo:
 class GitHubHelper:
     def __init__(self, accounts, cache_path):
         self.accounts = accounts
-        self.cache_path = cache_path
-        self.cache_path = self.cache_path / "gh_cache.json"
+        self.cache_path = Path(cache_path) / "gh_cache.json"
+        self.cache = []
+        logger.info(f"Initializing GitHubHelper with accounts: '{accounts}'")
+        logger.info(f"Cache path: {self.cache_path}")
+
         if os.path.exists(self.cache_path):
-            cached_data = json.load(open(self.cache_path))
-            self.cache = [Repo.from_dict(cached_repo) for cached_repo in cached_data]
+            try:
+                cached_data = json.load(open(self.cache_path))
+                self.cache = [Repo.from_dict(cached_repo) for cached_repo in cached_data]
+                logger.info(f"Loaded {len(self.cache)} repos from cache")
+            except Exception as e:
+                logger.error(f"Failed to load cache: {e}")
+        else:
+            logger.warning(f"Cache file does not exist at {self.cache_path}")
 
     def get_accounts(self):
         """
@@ -61,60 +84,125 @@ class GitHubHelper:
         """
         accounts = []
         for account in self.accounts.split(","):
-            accounts.append(account.strip())
+            if account.strip():
+                accounts.append(account.strip())
+        logger.info(f"Parsed accounts: {accounts}")
         return accounts
 
     def get_repos_for_account(self, account):
         repos = []
         url = "https://api.github.com/search/repositories?q=user:{}".format(account.lower())
-        while url:
-            req = requests.get(url)
-            data = req.json()
-            url = req.links.get("next", {}).get("url")
+        logger.info(f"Fetching repos for account: {account}")
+        logger.debug(f"Initial URL: {url}")
 
-            for repo in data["items"]:
-                if repo["archived"] == True:
-                    continue
-                repos.append(
-                    Repo(
-                        name=repo["name"],
-                        account=repo["owner"]["login"],
-                        url=repo["html_url"],
-                        description=repo["description"] or "",
+        page_count = 0
+        while url:
+            try:
+                page_count += 1
+                logger.debug(f"Fetching page {page_count}: {url}")
+                req = requests.get(url, timeout=10)
+
+                logger.debug(f"Response status: {req.status_code}")
+                logger.debug(f"Rate limit remaining: {req.headers.get('X-RateLimit-Remaining')}")
+
+                if req.status_code != 200:
+                    logger.error(f"API request failed with status {req.status_code}: {req.text}")
+                    break
+
+                data = req.json()
+
+                if "items" not in data:
+                    logger.error(f"No 'items' in response. Keys: {data.keys()}. Message: {data.get('message', 'N/A')}")
+                    break
+
+                logger.info(f"Found {len(data['items'])} repos in page {page_count}")
+                url = req.links.get("next", {}).get("url")
+
+                for repo in data["items"]:
+                    if repo["archived"] == True:
+                        logger.debug(f"Skipping archived repo: {repo['name']}")
+                        continue
+                    repos.append(
+                        Repo(
+                            name=repo["name"],
+                            account=repo["owner"]["login"],
+                            url=repo["html_url"],
+                            description=repo["description"] or "",
+                        )
                     )
-                )
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Request failed for {url}: {e}")
+                break
+            except Exception as e:
+                logger.error(f"Error processing repos for account {account}: {e}", exc_info=True)
+                break
+
+        logger.info(f"Total repos fetched for {account}: {len(repos)}")
         return repos
 
     def cache_all_repos(self, overwrite=True):
-        if not overwrite and self.cache_path.exitst():
+        logger.info(f"cache_all_repos called with overwrite={overwrite}")
+        if not overwrite and self.cache_path.exists():
+            logger.info("Cache exists and overwrite=False, skipping refresh")
             return
-        repos = []
-        for account in self.get_accounts():
-            repos += self.get_repos_for_account(account)
 
-        with open(self.cache_path, "w") as f:
-            f.write(json.dumps([repo.to_dict() for repo in repos], indent=4))
+        repos = []
+        accounts = self.get_accounts()
+
+        if not accounts or (len(accounts) == 1 and not accounts[0]):
+            logger.warning("No accounts configured!")
+            return
+
+        logger.info(f"Fetching repos for {len(accounts)} account(s)")
+        for account in accounts:
+            account_repos = self.get_repos_for_account(account)
+            repos += account_repos
+            logger.info(f"Account {account}: fetched {len(account_repos)} repos")
+
+        logger.info(f"Total repos to cache: {len(repos)}")
+
+        try:
+            # Ensure the cache directory exists
+            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+            logger.debug(f"Ensured cache directory exists: {self.cache_path.parent}")
+
+            with open(self.cache_path, "w") as f:
+                f.write(json.dumps([repo.to_dict() for repo in repos], indent=4))
             self.cache = repos
+            logger.info(f"Successfully cached {len(repos)} repos to {self.cache_path}")
+        except Exception as e:
+            logger.error(f"Failed to write cache: {e}", exc_info=True)
 
 
 class Plugin(PluginInstance, TriggerQueryHandler):
     executables = []
 
     def __init__(self):
-        TriggerQueryHandler.__init__(
-            self,
-            id=md_id,
-            name=md_name,
-            description=md_description,
-            synopsis="repo name",
-            defaultTrigger="gh ",
-        )
-        PluginInstance.__init__(self, extensions=[self])
+        PluginInstance.__init__(self)
+        TriggerQueryHandler.__init__(self)
+        logger.info("Plugin initializing...")
+
         self._accounts = self.readConfig("accounts", str)
+        logger.info(f"Read accounts from config: '{self._accounts}'")
+
         if self._accounts is None:
             self._accounts = ""
+            logger.warning("No accounts configured in settings")
 
-        self.gh = GitHubHelper(self.accounts, self.cacheLocation)
+        cache_location = self.cacheLocation()
+        logger.info(f"Cache location: {cache_location}")
+        self.gh = GitHubHelper(self.accounts, cache_location)
+
+        # If cache is empty, try to populate it
+        if not self.gh.cache:
+            logger.info("Cache is empty, attempting initial population")
+            self.gh.cache_all_repos(overwrite=False)
+
+    def defaultTrigger(self):
+        return "gh "
+
+    def synopsis(self, query):
+        return "repo name"
 
     @property
     def accounts(self):
@@ -136,6 +224,9 @@ class Plugin(PluginInstance, TriggerQueryHandler):
         ]
 
     def handleTriggerQuery(self, query: Query):
+        logger.debug(f"Query triggered with string: '{query.string}'")
+        logger.debug(f"Cache contains {len(self.gh.cache)} repos")
+
         if query.string.startswith("a "):
             # This is an admin command
             query.add(
@@ -143,33 +234,34 @@ class Plugin(PluginInstance, TriggerQueryHandler):
                     id="refresh",
                     text="Refresh",
                     subtext="Update cached repos from GitHub API",
-                    actions=[Action("update", "Update", self.gh.cache_all_repos)],
+                    icon_factory=lambda: makeThemeIcon("view-refresh"),
+                    actions=[Action(id="update", text="Update", callable=self.gh.cache_all_repos)],
                 )
             )
         else:
-            query.add(
-                [
-                    self._make_item(repo, query)
-                    for repo in self.gh.cache
-                    if repo.matches_query(query.string.lower())
-                ]
-            )
+            matching_repos = [
+                repo for repo in self.gh.cache
+                if repo.matches_query(query.string.lower())
+            ]
+            logger.debug(f"Found {len(matching_repos)} matching repos")
+            query.add([self._make_item(repo, query) for repo in matching_repos])
 
     def _make_item(self, repo: Repo, query: Query) -> Item:
         return StandardItem(
             id=f"{repo.account}-{repo.name}",
             text=repo.name,
             subtext=repo.description,
-            inputActionText=query.trigger + repo.name,
+            input_action_text=query.trigger + repo.name,
+            icon_factory=lambda: makeThemeIcon("github"),
             actions=[
-                Action("open", "Open repo on GitHub", lambda u=repo.url: openUrl(u)),
+                Action(id="open", text="Open repo on GitHub", callable=lambda u=repo.url: openUrl(u)),
                 Action(
-                    "prs",
-                    "Open pull requests",
-                    lambda u=repo.url: openUrl(u + "/pulls"),
+                    id="prs",
+                    text="Open pull requests",
+                    callable=lambda u=repo.url: openUrl(u + "/pulls"),
                 ),
                 Action(
-                    "issues", "Open issues", lambda u=repo.url: openUrl(u + "/issues")
+                    id="issues", text="Open issues", callable=lambda u=repo.url: openUrl(u + "/issues")
                 ),
             ],
         )
