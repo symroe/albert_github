@@ -3,20 +3,20 @@
 __doc__ = """
 Access your GitHub repos quickly through Albert.
 
-This plugin caches all repos for a list of accounts (configured via the 
-plugin settings). 
+This plugin caches all repos for a list of accounts (configured via the
+plugin settings).
 
 It then allows opening the repo home page, PRs or issues.
 """
 
 
-md_iid = "4.0"
+md_iid = "5.0"
 md_version = "2.0"
 md_name = "GitHub projects"
 md_description = "Open your GitHub projects using Albert"
 md_license = "MIT"
 md_url = "https://github.com/symroe/albert_github"
-md_maintainers = "https://mastodon.me.uk/@symroe"
+md_maintainers = ["https://mastodon.me.uk/@symroe"]
 md_lib_dependencies = ["requests"]
 
 import json
@@ -31,11 +31,11 @@ from albert import *
 # Set up logging
 logging.basicConfig(
     level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.FileHandler(os.path.expanduser('~/.cache/albert/github_plugin.log')),
-        logging.StreamHandler()
-    ]
+        logging.FileHandler(os.path.expanduser("~/.cache/albert/github_plugin.log")),
+        logging.StreamHandler(),
+    ],
 )
 logger = logging.getLogger(__name__)
 
@@ -69,7 +69,9 @@ class GitHubHelper:
         if os.path.exists(self.cache_path):
             try:
                 cached_data = json.load(open(self.cache_path))
-                self.cache = [Repo.from_dict(cached_repo) for cached_repo in cached_data]
+                self.cache = [
+                    Repo.from_dict(cached_repo) for cached_repo in cached_data
+                ]
                 logger.info(f"Loaded {len(self.cache)} repos from cache")
             except Exception as e:
                 logger.error(f"Failed to load cache: {e}")
@@ -91,7 +93,9 @@ class GitHubHelper:
 
     def get_repos_for_account(self, account):
         repos = []
-        url = "https://api.github.com/search/repositories?q=user:{}".format(account.lower())
+        url = "https://api.github.com/search/repositories?q=user:{}".format(
+            account.lower()
+        )
         logger.info(f"Fetching repos for account: {account}")
         logger.debug(f"Initial URL: {url}")
 
@@ -103,16 +107,22 @@ class GitHubHelper:
                 req = requests.get(url, timeout=10)
 
                 logger.debug(f"Response status: {req.status_code}")
-                logger.debug(f"Rate limit remaining: {req.headers.get('X-RateLimit-Remaining')}")
+                logger.debug(
+                    f"Rate limit remaining: {req.headers.get('X-RateLimit-Remaining')}"
+                )
 
                 if req.status_code != 200:
-                    logger.error(f"API request failed with status {req.status_code}: {req.text}")
+                    logger.error(
+                        f"API request failed with status {req.status_code}: {req.text}"
+                    )
                     break
 
                 data = req.json()
 
                 if "items" not in data:
-                    logger.error(f"No 'items' in response. Keys: {data.keys()}. Message: {data.get('message', 'N/A')}")
+                    logger.error(
+                        f"No 'items' in response. Keys: {data.keys()}. Message: {data.get('message', 'N/A')}"
+                    )
                     break
 
                 logger.info(f"Found {len(data['items'])} repos in page {page_count}")
@@ -134,7 +144,9 @@ class GitHubHelper:
                 logger.error(f"Request failed for {url}: {e}")
                 break
             except Exception as e:
-                logger.error(f"Error processing repos for account {account}: {e}", exc_info=True)
+                logger.error(
+                    f"Error processing repos for account {account}: {e}", exc_info=True
+                )
                 break
 
         logger.info(f"Total repos fetched for {account}: {len(repos)}")
@@ -174,12 +186,12 @@ class GitHubHelper:
             logger.error(f"Failed to write cache: {e}", exc_info=True)
 
 
-class Plugin(PluginInstance, TriggerQueryHandler):
+class Plugin(PluginInstance, GeneratorQueryHandler):
     executables = []
 
     def __init__(self):
         PluginInstance.__init__(self)
-        TriggerQueryHandler.__init__(self)
+        GeneratorQueryHandler.__init__(self)
         logger.info("Plugin initializing...")
 
         self._accounts = self.readConfig("accounts", str)
@@ -223,45 +235,56 @@ class Plugin(PluginInstance, TriggerQueryHandler):
             }
         ]
 
-    def handleTriggerQuery(self, query: Query):
-        logger.debug(f"Query triggered with string: '{query.string}'")
+    def items(self, context: QueryContext):
+        logger.debug(f"Query triggered with string: '{context.query}'")
         logger.debug(f"Cache contains {len(self.gh.cache)} repos")
 
-        if query.string.startswith("a "):
+        if context.query.startswith("a "):
             # This is an admin command
-            query.add(
+            yield [
                 StandardItem(
                     id="refresh",
                     text="Refresh",
                     subtext="Update cached repos from GitHub API",
-                    icon_factory=lambda: makeThemeIcon("view-refresh"),
-                    actions=[Action(id="update", text="Update", callable=self.gh.cache_all_repos)],
+                    icon_factory=lambda: Icon.theme("view-refresh"),
+                    actions=[
+                        Action(
+                            id="update", text="Update", callable=self.gh.cache_all_repos
+                        )
+                    ],
                 )
-            )
+            ]
         else:
             matching_repos = [
-                repo for repo in self.gh.cache
-                if repo.matches_query(query.string.lower())
+                repo
+                for repo in self.gh.cache
+                if repo.matches_query(context.query.lower())
             ]
             logger.debug(f"Found {len(matching_repos)} matching repos")
-            query.add([self._make_item(repo, query) for repo in matching_repos])
+            yield [self._make_item(repo, context) for repo in matching_repos]
 
-    def _make_item(self, repo: Repo, query: Query) -> Item:
+    def _make_item(self, repo: Repo, context: QueryContext) -> Item:
         return StandardItem(
             id=f"{repo.account}-{repo.name}",
             text=repo.name,
             subtext=repo.description,
-            input_action_text=query.trigger + repo.name,
-            icon_factory=lambda: makeThemeIcon("github"),
+            input_action_text=context.trigger + repo.name,
+            icon_factory=lambda: Icon.theme("github"),
             actions=[
-                Action(id="open", text="Open repo on GitHub", callable=lambda u=repo.url: openUrl(u)),
+                Action(
+                    id="open",
+                    text="Open repo on GitHub",
+                    callable=lambda u=repo.url: openUrl(u),
+                ),
                 Action(
                     id="prs",
                     text="Open pull requests",
                     callable=lambda u=repo.url: openUrl(u + "/pulls"),
                 ),
                 Action(
-                    id="issues", text="Open issues", callable=lambda u=repo.url: openUrl(u + "/issues")
+                    id="issues",
+                    text="Open issues",
+                    callable=lambda u=repo.url: openUrl(u + "/issues"),
                 ),
             ],
         )
